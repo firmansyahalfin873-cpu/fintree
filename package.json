@@ -1,0 +1,36 @@
+{
+  "name": "fintree-foundation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "demo": "node scripts/demo.mjs",
+    "preview": "node scripts/preview-server.mjs",
+    "testnet": "node scripts/testnet-server.mjs",
+    "prepare:testnet": "node scripts/prepare-testnet-deployment.mjs",
+    "setup:testnet": "node scripts/setup-testnet.mjs",
+    "example:webhook": "node scripts/merchant-webhook-example.mjs",
+    "deploy:testnet": "node scripts/deploy-testnet.mjs",
+    "db:migrate": "node scripts/migrate-local-db.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "devDependencies": {
+    "@openzeppelin/contracts": "5.0.2",
+    "esbuild": "0.28.2",
+    "hardhat": "3.21.2",
+    "solc": "0.8.38"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.15",
+    "ethers": "^6.17.0",
+    "ipaddr.js": "2.5.0"
+  },
+  "overrides": {
+    "solc": {
+      "tmp": "0.2.7"
+    }
+  }
+}

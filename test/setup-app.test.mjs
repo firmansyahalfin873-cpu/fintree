@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createSetupApp } from '../src/deployment/setup-app.mjs';
+import { DatabaseMigrationRequiredError } from '../src/storage/local-database.mjs';
+import { SetupRecoveryRequiredError } from '../src/deployment/setup-service.mjs';
+
+test('setup app accepts only same-origin bounded JSON requests and never echoes errors', async () => {
+  const origin = 'http://127.0.0.1:4175'; let calls = 0;
+  const service = { prepare: async (body) => { calls++; assert.equal(body.password, 'private password'); return { chainId: 84532n }; }, reserve: async () => { throw new Error('sensitive detail'); }, start: async () => { throw new DatabaseMigrationRequiredError(); } };
+  const app = createSetupApp({ origin, service, assets: { html: '<h1>setup</h1>', javascript: '', css: '' } });
+  const request = (url, options) => app(new Request(`${origin}${url}`, options));
+  const get = await request('/');
+  assert.equal(get.status, 200);
+  assert.match(get.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  const data = JSON.stringify({ password: 'private password' });
+  assert.equal((await request('/api/prepare', { method: 'POST', headers: { origin: 'https://example.com', 'content-type': 'application/json' }, body: data })).status, 403);
+  assert.equal((await request('/api/prepare', { method: 'POST', headers: { origin, 'content-type': 'text/plain' }, body: data })).status, 400);
+  assert.equal((await request('/api/prepare', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ x: 'a'.repeat(9000) }) })).status, 400);
+  assert.equal(calls, 0);
+  const ok = await request('/api/prepare', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: data });
+  assert.deepEqual(await ok.json(), { chainId: '84532' });
+  assert.equal(calls, 1);
+  const failed = await request('/api/reserve', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(await failed.text(), '{"error":"setup_failed"}');
+  const migration = await request('/api/start', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(migration.status, 409);
+  assert.deepEqual(await migration.json(), { error: 'database_migration_required' });
+  const recoveryApp = createSetupApp({ origin, service: { prepare: async () => { throw new SetupRecoveryRequiredError(); }, start: async () => { throw new SetupRecoveryRequiredError(); } }, assets: {} });
+  const recovery = await recoveryApp(new Request(`${origin}/api/prepare`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' }));
+  assert.equal(recovery.status, 409); assert.deepEqual(await recovery.json(), { error: 'setup_recovery_required' });
+  const missingWebhookKey = await recoveryApp(new Request(`${origin}/api/start`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' }));
+  assert.equal(missingWebhookKey.status, 409); assert.deepEqual(await missingWebhookKey.json(), { error: 'setup_recovery_required' });
+});

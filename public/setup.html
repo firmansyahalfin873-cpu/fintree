@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Persiapan Fintree Testnet</title><link rel="stylesheet" href="/setup.css"></head>
+<body><main><h1>Persiapan Fintree Testnet</h1><p>Pengujian lokal untuk Base Sepolia. Persetujuan transaksi dilakukan di ekstensi wallet Anda.</p>
+<p>Alamat treasury menerima biaya protokol uji dan ditetapkan permanen pada kontrak. Periksa alamatnya sebelum melanjutkan.</p>
+<button id="switch-network" type="button">Pilih Base Sepolia di wallet</button> <button id="connect" type="button">Hubungkan wallet</button><p id="account">Wallet belum terhubung.</p><p id="balance">Saldo ETH uji belum diperiksa.</p><button id="refresh-balance" type="button" hidden>Periksa saldo uji lagi</button>
+<p>Untuk saldo uji, Anda dapat mencoba <a href="https://www.alchemy.com/faucets/base-sepolia" target="_blank" rel="noopener noreferrer">faucet ETH Base Sepolia</a> (memiliki syarat kelayakan) dan <a href="https://faucet.circle.com/" target="_blank" rel="noopener noreferrer">faucet USDC dari Circle</a>. Gunakan alamat publik wallet; jangan masukkan seed phrase atau kunci pribadi.</p>
+<form id="form"><label>Alamat treasury testnet<input id="treasury" required autocomplete="off" spellcheck="false"></label>
+<label>Kata sandi penandatangan aplikasi<input id="password" type="password" minlength="12" required autocomplete="new-password"></label>
+<label>Ulangi kata sandi<input id="password-confirm" type="password" minlength="12" required autocomplete="new-password"></label>
+<p>Gunakan kata sandi baru minimal 12 karakter dan simpan dengan aman. Ini bukan seed phrase atau kata sandi wallet Anda. Kata sandi yang sama diperlukan saat membuka kembali pengaturan ini.</p>
+<button id="prepare" type="submit">Periksa persiapan</button></form><section id="review" hidden><h2>Periksa sebelum mengirim</h2><pre id="details"></pre><button id="deploy" type="button">Lanjutkan ke wallet</button><button id="confirm" type="button" hidden>Periksa transaksi lagi</button></section>
+<form id="recover-form" hidden><h2>Periksa transaksi yang sudah dikirim</h2><p>Jika wallet menunjukkan transaksi pemasangan, salin hash transaksi dari riwayat wallet. Ini hanya memeriksa transaksi yang sudah ada.</p><label>Hash transaksi<input id="recover-hash" required autocomplete="off" spellcheck="false" pattern="0x[0-9a-fA-F]{64}"></label><button type="submit">Periksa transaksi</button></form>
+<form id="start-form" hidden><h2>Mulai layanan testnet</h2><label>Kata sandi penandatangan aplikasi<input id="unlock" type="password" minlength="12" required autocomplete="current-password"></label><button type="submit">Mulai layanan</button><p><a id="runtime-link" href="http://127.0.0.1:4174/" hidden>Buka layanan testnet</a></p></form>
+<p id="status" role="status" aria-live="polite"></p></main><script type="module" src="/setup.js"></script></body></html>

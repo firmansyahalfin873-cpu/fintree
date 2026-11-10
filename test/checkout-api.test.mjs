@@ -1,0 +1,71 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { PGlite } from '@electric-sql/pglite';
+import { Wallet } from 'ethers';
+import { issueApiKey, revokeApiKey } from '../src/auth/api-keys.mjs';
+import { createCheckoutHandler } from '../src/api/checkout-handler.mjs';
+import { createPublicCheckoutHandler } from '../src/api/public-checkout-handler.mjs';
+import { FintreeClient } from '../src/sdk/index.mjs';
+
+test('authenticated checkout API isolates merchants, supports retry and revocation', async (t) => {
+  const db = new PGlite();
+  t.after(() => db.close());
+  await db.exec(fs.readFileSync('db/schema-draft.sql', 'utf8'));
+  await db.exec(fs.readFileSync('db/local-migrations/003-checkout-details.sql', 'utf8'));
+  const a = '00000000-0000-0000-0000-000000000001', b = '00000000-0000-0000-0000-000000000002';
+  await db.query('insert into fintree_private.merchants (id,wallet_address,business_name) values ($1,$2,$3),($4,$5,$6)', [a, Wallet.createRandom().address.toLowerCase(), 'A', b, Wallet.createRandom().address.toLowerCase(), 'B']);
+  const firstKey = await issueApiKey(db, a), secondKey = await issueApiKey(db, b);
+  const stored = (await db.query('select * from fintree_private.api_keys where id=$1', [firstKey.id])).rows[0];
+  assert.notEqual(stored.key_hash, firstKey.key);
+  assert.equal(JSON.stringify(stored).includes(firstKey.key), false);
+  const signer = Wallet.createRandom();
+  const handler = createCheckoutHandler({ db, signer, checkoutOrigin: 'https://pay.example', config: { chainId: 84532n, contract: Wallet.createRandom().address, token: Wallet.createRandom().address, signerAddress: signer.address, tokenDecimals: 6, feeBps: 30, ttlSeconds: 900 } });
+  const path = 'http://localhost/api/v1/checkout/sessions';
+  const post = (key, body, extra = {}) => handler(new Request(path, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', 'idempotency-key': 'test-1', ...extra }, body: JSON.stringify(body) }));
+  const data = { amount: '5', feePayer: 'customer', orderId: 'order1' };
+  assert.equal((await post('bad', data)).status, 401);
+  const created = await post(firstKey.key, data);
+  assert.equal(created.status, 201);
+  const session = await created.json();
+  assert.equal(session.checkoutUrl, `https://pay.example/pay/${session.id}`);
+  assert.equal((await post(firstKey.key, data)).status, 200);
+  assert.equal((await post(firstKey.key, { ...data, amount: '6' })).status, 409);
+  assert.equal((await post(firstKey.key, data, { 'content-type': 'text/plain' })).status, 415);
+  assert.equal((await post(firstKey.key, { ...data, orderId: 'x'.repeat(9000) })).status, 413);
+  const get = (key) => handler(new Request(`${path}/${session.id}`, { headers: { authorization: `Bearer ${key}` } }));
+  assert.equal((await get(firstKey.key)).status, 200);
+  assert.equal((await get(secondKey.key)).status, 404);
+  const list = await handler(new Request(path, { headers: { authorization: `Bearer ${firstKey.key}` } }));
+  assert.equal((await list.json()).data.length, 1);
+  const otherList = await handler(new Request(path, { headers: { authorization: `Bearer ${secondKey.key}` } }));
+  assert.equal((await otherList.json()).data.length, 0);
+  const sdk = new FintreeClient({ apiKey: firstKey.key, baseUrl: 'http://localhost/', fetchImpl: (url, options) => handler(new Request(url, options)) });
+  const sdkSession = await sdk.createCheckoutSession({ amount: '1', orderId: 'sdk-order', feePayer: 'merchant' }, { idempotencyKey: 'sdk-1' });
+  assert.equal((await sdk.getCheckoutSession(sdkSession.id)).orderId, 'sdk-order');
+  // Identical timestamps exercise the ID tie-breaker; the cursor is scoped to its merchant.
+  await db.query(`insert into fintree_private.invoices
+    (id,merchant_id,idempotency_key,request_hash,external_order_id,chain_id,contract_address,token_address,merchant_address,invoice_amount,merchant_amount,protocol_fee,total_payable,fee_bps,fee_payer,quote_signature,deadline,created_at)
+    select '0x'||lpad(to_hex(n),64,'0'),merchant_id,'seed-'||n,request_hash,'seed-'||n,chain_id,contract_address,token_address,merchant_address,invoice_amount,merchant_amount,protocol_fee,total_payable,fee_bps,fee_payer,quote_signature,deadline,'2026-01-01T00:00:00Z'::timestamptz
+    from fintree_private.invoices cross join generate_series(1,55) n where id=$1`, [session.id]);
+  const listWithCursor = (key, cursor = '') => handler(new Request(`${path}${cursor ? `?starting_after=${cursor}` : ''}`, { headers: { authorization: `Bearer ${key}` } }));
+  const pageOne = await (await listWithCursor(firstKey.key)).json();
+  const pageTwo = await (await listWithCursor(firstKey.key, pageOne.nextCursor)).json();
+  assert.equal(pageOne.data.length, 50);
+  assert.equal(pageTwo.data.length, 7);
+  assert.equal(pageTwo.nextCursor, null);
+  assert.equal(new Set([...pageOne.data, ...pageTwo.data].map((row) => row.id)).size, 57);
+  assert.equal((await (await listWithCursor(secondKey.key, pageOne.nextCursor)).json()).data.length, 0);
+  assert.equal((await listWithCursor(firstKey.key, 'invalid')).status, 400);
+  const publicHandler = createPublicCheckoutHandler({ db });
+  const publicResponse = await publicHandler(new Request(`http://localhost/api/v1/public/checkout/sessions/${session.id}`));
+  assert.equal(publicResponse.status, 200);
+  const publicBody = await publicResponse.json();
+  assert.equal(publicBody.businessName, 'A');
+  assert.equal(publicBody.merchant, session.merchant);
+  for (const privateField of ['merchantId', 'idempotencyKey', 'requestHash', 'keyHash', 'apiKey']) assert.equal(privateField in publicBody, false);
+  assert.equal((await publicHandler(new Request(`http://localhost/api/v1/public/checkout/sessions/0x${'0'.repeat(64)}`))).status, 404);
+  assert.equal(await revokeApiKey(db, b, firstKey.id), false);
+  assert.equal(await revokeApiKey(db, a, firstKey.id), true);
+  assert.equal((await get(firstKey.key)).status, 401);
+});

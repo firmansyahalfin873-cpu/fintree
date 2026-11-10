@@ -1,0 +1,54 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { PGlite } from '@electric-sql/pglite';
+import { Wallet } from 'ethers';
+import { authenticateApiKey } from '../src/auth/api-keys.mjs';
+import { createWalletChallenge, completeWalletChallenge } from '../src/auth/wallet-onboarding.mjs';
+import { createOnboardingHandler } from '../src/api/onboarding-handler.mjs';
+
+test('wallet onboarding requires a matching, unexpired, single-use signature', async (t) => {
+  const db = new PGlite();
+  t.after(() => db.close());
+  await db.exec(fs.readFileSync('db/schema-draft.sql', 'utf8'));
+  await db.exec(fs.readFileSync('db/local-migrations/003-checkout-details.sql', 'utf8'));
+  const wallet = Wallet.createRandom(), attacker = Wallet.createRandom(), origin = 'http://localhost:3000';
+  const challenge = await createWalletChallenge(db, wallet.address, origin);
+  const signature = await wallet.signMessage(challenge.message);
+  const complete = (overrides = {}) => completeWalletChallenge(db, { id: challenge.id, nonce: challenge.nonce, signature, origin, ...overrides });
+  assert.equal(await complete({ signature: await attacker.signMessage(challenge.message) }), null);
+  assert.equal(await complete({ nonce: '0'.repeat(64) }), null);
+  assert.equal(await complete({ origin: 'https://attacker.invalid' }), null);
+  await assert.rejects(complete({ id: '-'.repeat(36) }), TypeError);
+  const [one, two] = await Promise.all([complete(), complete()]);
+  const issued = [one, two].filter(Boolean);
+  assert.equal(issued.length, 1);
+  assert.equal((await authenticateApiKey(db, issued[0].apiKey)).merchantId, issued[0].merchantId);
+  assert.equal(await complete(), null);
+  const expired = await createWalletChallenge(db, wallet.address, origin);
+  const expiredAt = (await db.query("update fintree_private.wallet_challenges set expires_at=date_trunc('second',now())-interval '1 second' where id=$1 returning expires_at", [expired.id])).rows[0].expires_at;
+  const expiredSignature = await wallet.signMessage(expired.message.replace(expired.expires, new Date(expiredAt).toISOString()));
+  assert.equal(await completeWalletChallenge(db, { id: expired.id, nonce: expired.nonce, signature: expiredSignature, origin }), null);
+  await assert.rejects(createWalletChallenge(db, wallet.address, 'http://example.com'), TypeError);
+  assert.equal((await db.query('select count(*)::int as n from fintree_private.api_keys')).rows[0].n, 1);
+});
+
+test('onboarding HTTP handler uses server origin and issues a key after signature', async (t) => {
+  const db = new PGlite();
+  t.after(() => db.close());
+  await db.exec(fs.readFileSync('db/schema-draft.sql', 'utf8'));
+  await db.exec(fs.readFileSync('db/local-migrations/003-checkout-details.sql', 'utf8'));
+  const wallet = Wallet.createRandom();
+  const handler = createOnboardingHandler({ db, origin: 'http://localhost:3000' });
+  const post = (path, payload) => handler(new Request(`http://localhost:3000${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://attacker.invalid' }, body: JSON.stringify(payload) }));
+  const response = await post('/api/v1/wallet/challenge', { wallet: wallet.address });
+  assert.equal(response.status, 201);
+  const challenge = await response.json();
+  assert.match(challenge.message, /Origin: http:\/\/localhost:3000/);
+  const proof = { id: challenge.id, nonce: challenge.nonce, signature: await wallet.signMessage(challenge.message) };
+  const completed = await post('/api/v1/wallet/complete', proof);
+  assert.equal(completed.status, 201);
+  const issued = await completed.json();
+  assert.equal((await authenticateApiKey(db, issued.apiKey)).merchantId, issued.merchantId);
+  assert.equal((await post('/api/v1/wallet/complete', proof)).status, 401);
+});
